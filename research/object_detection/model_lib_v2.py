@@ -22,6 +22,7 @@ import copy
 import os
 import pprint
 import time
+from pathlib import Path
 
 import numpy as np
 import tensorflow.compat.v1 as tf
@@ -1018,6 +1019,10 @@ def eager_eval_loop(
     tf.logging.info('\t+ %s: %f', k, eval_metrics[k])
   return eval_metrics
 
+def find_ckpt_num(string):
+    for i in range(len(string)-1, -1 ,-1):
+        if string[i] == '/':
+            return(string[i+1:])
 
 def eval_continuously(
     pipeline_config_path,
@@ -1132,6 +1137,9 @@ def eval_continuously(
   optimizer, _ = optimizer_builder.build(
       configs['train_config'].optimizer, global_step=global_step)
 
+  # Keep the best mAP record
+  best_mAP = 0.0
+
   for latest_checkpoint in tf.train.checkpoints_iterator(
       checkpoint_dir, timeout=timeout, min_interval_secs=wait_interval):
     ckpt = tf.compat.v2.train.Checkpoint(
@@ -1155,7 +1163,7 @@ def eval_continuously(
     summary_writer = tf.compat.v2.summary.create_file_writer(
         os.path.join(model_dir, 'eval', eval_input_config.name))
     with summary_writer.as_default():
-      eager_eval_loop(
+      e_metrics = eager_eval_loop(
           detection_model,
           configs,
           eval_input,
@@ -1163,6 +1171,33 @@ def eval_continuously(
           postprocess_on_cpu=postprocess_on_cpu,
           global_step=global_step,
           )
+
+      # TODO: Get e_metric['Loss/total_loss'] and save best model based on this metric
+      metadata = helpers.get_metadata()
+      model, model_path = helpers.get_latest_model(metadata)
+      best_ckpt_dir = Path(model_path, "best_ckpt")
+
+      if e_metrics['DetectionBoxes_Precision/mAP'] > best_mAP:
+        tf.logging.info('latest checkpoint' + latest_checkpoint)
+        ckpt_idx = latest_checkpoint + '.index'
+        ckpt_data = latest_checkpoint + '.data-00000-of-00001'
+        ckpt_file = model_path + '/checkpoint'
+        ckpt_name = find_ckpt_num(latest_checkpoint)
+
+        try:
+          os.makedirs("best_ckpt")
+          print(f"Directory best_ckpt created successfully!")
+        except OSError as error:
+          print(f"Error creating directory: {error}")
+
+        new_idx = best_ckpt_dir + '/' + ckpt_name + '.index'
+        new_data = best_ckpt_dir + '/' + ckpt_name + '.data-00000-of-00001'
+        new_ckpt = best_ckpt_dir + '/checkpoint'
+        shutil.copyfile(ckpt_idx, new_idx)
+        shutil.copyfile(ckpt_data, new_data)
+        shutil.copyfile(ckpt_file, new_ckpt)
+        best_mAP = e_metrics['DetectionBoxes_Precision/mAP']
+        tf.logging.info('current best mAP' + str(best_mAP))
 
     if global_step.numpy() == configs['train_config'].num_steps:
       tf.logging.info('Exiting evaluation at step %d', global_step.numpy())
